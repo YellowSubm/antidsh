@@ -1,0 +1,13 @@
+# Reference source repositories (cloned locally for inspection only)
+ref/
+
+# Build & dependencies
+node_modules/
+dist/
+*.tsbuildinfo
+package-lock.json
+
+# Local secrets & runtime artifacts
+.env
+.env.local
+*.log

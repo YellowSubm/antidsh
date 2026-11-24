@@ -1,0 +1,33 @@
+# dsh-antidsh-mcp — expose this dsh web session control plane over MCP.
+#
+# Installed into a profile from GitHub (or a local checkout):
+#
+#   # For dsh Desktop (quit Desktop first, using Desktop's bundled `dsh` CLI,
+#   # or install directly from Desktop's Plugins UI):
+#   dsh plugin --profile desktop add github:YellowSubm/antidsh
+#
+#   # For dsh web:
+#   npx @deepseek-ai/dsh plugin --profile web add github:YellowSubm/antidsh
+#
+# The installed package is added to `dsh.profile.bundles` automatically, which
+# contributes this patch layer. Restart `dsh web` after adding or updating a
+# bundle; plain edits to the profile's own cordis.patch.yml reload live.
+#
+# Configuration is optional. A profile-level patch replaces this row's whole
+# `config` object (patches never deep-merge), so declare every option you want
+# to override:
+#
+#   - id: dsh-antidsh-mcp
+#     config:
+#       token: '<long random string>'
+#       path: /antidsh/mcp
+#       allowUnauthenticatedLoopback: false
+#       defaultWaitMs: 0
+#
+# `token` falls back to the ANTIDSH_MCP_TOKEN environment variable. With no
+# token configured the endpoint fails closed and answers every request with
+# 503; `allowUnauthenticatedLoopback: true` is a development-only escape hatch
+# for loopback clients and must not be enabled on an exposed dsh web instance.
+- insert:
+    - id: dsh-antidsh-mcp
+      name: 'dsh-antidsh-mcp'
