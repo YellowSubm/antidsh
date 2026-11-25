@@ -27,6 +27,7 @@ Use this playbook whenever Antigravity (Neon) acts as **Architect / Reviewer** a
 3. **Progressive Disclosure (Protect Neon's Context)**
    - Never ask for full raw logs up front.
    - Inspect in layers: `dsh_wait` summary → `dsh_inspect(view="summary")` → `dsh_inspect(view="diff")` (file list + stat first) → `dsh_inspect(view="diff", path="...")` for specific files → `dsh_inspect(view="events", before_seq=...)` only when debugging a failure.
+   - Treat `latest_reply_kind` / `latest_reply` as the primary answer (`final` > `progress` > `none`), and read `failure` for a coarse category plus a `hint` when the turn ended in error; `view="summary"` already filters low-signal events.
 4. **Respect Human-in-the-Loop Control**
    - Because `antidsh` shares the live `dsh web` process, the user can watch, stop, or message the same session directly in their browser at any time.
    - If `dsh_wait` returns `reason: "input-required"` (`pending_input` includes `approval` or `question`), STOP waiting immediately and tell the user clearly what is waiting in `dsh web` so they can approve or answer there.

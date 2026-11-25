@@ -84,6 +84,43 @@ test('dsh_inspect summary combines state, model, steps, queue, and recent usage'
   for (const call of calls) assert.equal(call[2], signal)
 })
 
+test('dsh_inspect summary filters noise and exposes the latest reply with failure', async () => {
+  const noise = [
+    'step/start',
+    'step/end',
+    'tool/ptc-dispatch-start',
+    'tool/ptc-dispatch',
+    'job/registered',
+    'job/settled',
+    'llm/retry-started',
+    'agent/inbox/spliced',
+  ]
+  const records = [
+    ...noise.map((type, index) => record(type, index + 1, {})),
+    record('assistant/message', 9, { turn: 1, step: 9, message: { content: [{ type: 'text', text: 'done' }] } }),
+    record('assistant/attempt', 10, {
+      turn: 1,
+      step: 10,
+      stream: [{ type: 'chunk', chunk: { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', status: 502, message: 'upstream' } } } }],
+    }),
+    record('turn/end', 11, { turn: 1, reason: { kind: 'error', error: { code: 'SERVER', status: 502, message: 'upstream' } } }),
+  ]
+  const { controller } = makeInspectController({ events: { cursor: 11, hasMore: false, records } })
+  const result = await createInspectTool(controller).handler({ session_id: 's1' })
+
+  assert.equal(result.latest_reply.seq, 9)
+  assert.equal(result.latest_reply.kind, 'final')
+  assert.equal(result.latest_reply.text, 'done')
+  assert.equal(result.failure.category, 'service')
+  assert.equal(result.failure.status, 502)
+
+  const stepTypes = result.recent_steps.map((step) => step.type)
+  for (const type of noise) assert.equal(stepTypes.includes(type), false)
+  assert.ok(stepTypes.includes('assistant'))
+  assert.ok(stepTypes.includes('turn_end'))
+})
+
+
 test('dsh_inspect events pages with before/through/limit and exposes next_before_seq', async () => {
   const long = 'x'.repeat(500)
   const { controller, calls } = makeInspectController({

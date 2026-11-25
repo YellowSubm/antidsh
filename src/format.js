@@ -368,6 +368,182 @@ function safeJson(value) {
 }
 
 /**
+ * Pick the assistant reply an orchestrator should read first. A final answer
+ * (text without tool calls) wins over newer progress text, which wins over
+ * nothing. Records must be chronological.
+ *
+ * @param {readonly unknown[]} assistantRecords
+ * @param {number} [maxChars]
+ * @returns {{ seq: number | null, kind: 'final' | 'progress' | 'none', text: string, truncated: boolean }}
+ */
+export function selectAssistantReply(assistantRecords, maxChars = 4000) {
+  const records = Array.isArray(assistantRecords) ? assistantRecords : []
+  let final = null
+  let progress = null
+  for (const record of records) {
+    const header = recordHeader(record)
+    if (header === null || header.type !== 'assistant/message') continue
+    const message = isObject(header.data.message) ? header.data.message : {}
+    const raw = blocksText(message.content)
+    if (raw.trim().length === 0) continue
+    const text = truncateText(raw, maxChars)
+    const candidate = { seq: header.seq, kind: 'progress', text: text.text, truncated: text.truncated }
+    progress = candidate
+    if (toolCallsOf(message).length === 0) final = { ...candidate, kind: 'final' }
+  }
+  return final ?? progress ?? { seq: null, kind: 'none', text: '', truncated: false }
+}
+
+const RETRYABLE_FAILURES = new Set(['service', 'rate_limit', 'transport', 'timeout'])
+
+const FAILURE_LABELS = {
+  service: 'Upstream service error',
+  rate_limit: 'Rate limit',
+  transport: 'Transport error',
+  auth: 'Authentication error',
+  timeout: 'Timeout',
+  aborted: 'Turn aborted',
+  tool_error: 'Tool error',
+  unknown: 'Session failure',
+}
+
+/**
+ * Reduce the latest failed turn or attempt to a coarse, safe diagnosis.
+ * Returns null when the current turn completed or produced a later message.
+ *
+ * @param {readonly unknown[]} records
+ * @returns {{ category: 'service'|'rate_limit'|'transport'|'auth'|'timeout'|'aborted'|'tool_error'|'unknown', status: number | null, code: string | null, retryable: boolean, summary: string, hint: string } | null}
+ */
+export function extractFailure(records) {
+  const list = Array.isArray(records) ? records : []
+  let start = 0
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    if (recordHeader(list[index])?.type === 'turn/start') {
+      start = index + 1
+      break
+    }
+  }
+
+  for (let index = list.length - 1; index >= start; index -= 1) {
+    const header = recordHeader(list[index])
+    if (header === null) continue
+    const { type, data } = header
+    if (type === 'turn/end') {
+      const reason = isObject(data.reason) ? data.reason : {}
+      if (reason.kind === 'interrupted') return diagnoseFailure({ code: 'INTERRUPTED', message: 'the turn was interrupted' })
+      if (reason.kind === 'aborted') return diagnoseFailure({ code: 'ABORTED', message: 'the turn was aborted' })
+      if (reason.kind === 'error') return diagnoseFailure(isObject(reason.error) ? reason.error : data.error)
+      if (reason.kind === 'completed') return null
+      continue
+    }
+    if (type === 'assistant/message') return null
+    if (type === 'llm/retry-started') return null
+    if (type === 'assistant/attempt') {
+      const failure = attemptFailure(data)
+      if (failure !== null) return diagnoseFailure(failure)
+      continue
+    }
+    if (type === 'llm/retry') {
+      const failure = isObject(data.failure) ? data.failure : null
+      const retry = typeof data.retry === 'number' ? data.retry : null
+      const maxRetries = typeof data.maxRetries === 'number' ? data.maxRetries : null
+      if (failure !== null && retry !== null && maxRetries !== null && retry >= maxRetries) {
+        return diagnoseFailure(failure)
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * @param {unknown} data
+ * @returns {Record<string, unknown> | null}
+ */
+function attemptFailure(data) {
+  if (isObject(data.failure)) return data.failure
+  const stream = Array.isArray(data.stream) ? data.stream : []
+  for (let index = stream.length - 1; index >= 0; index -= 1) {
+    const chunk = isObject(stream[index]) && isObject(stream[index].chunk) ? stream[index].chunk : null
+    if (chunk === null || chunk.type !== 'finish' || !isObject(chunk.reason)) continue
+    if (chunk.reason.kind === 'error' && isObject(chunk.reason.failure)) return chunk.reason.failure
+    if (chunk.reason.kind === 'aborted') return { code: 'ABORTED', message: 'the assistant attempt was aborted' }
+  }
+  return null
+}
+
+/**
+ * @param {unknown} value
+ * @returns {ReturnType<typeof diagnoseFailure>}
+ */
+function diagnoseFailure(value) {
+  const failure = isObject(value) ? value : {}
+  const code = typeof failure.code === 'string' && failure.code.length > 0 ? failure.code : null
+  const status = typeof failure.status === 'number' && Number.isFinite(failure.status) ? failure.status : null
+  const message = typeof failure.message === 'string' ? failure.message.trim() : ''
+  const category = failureCategory(code, status, message)
+  return {
+    category,
+    status,
+    code,
+    retryable: RETRYABLE_FAILURES.has(category),
+    summary: failureSummary(category, code, status, message),
+    hint: failureHint(category),
+  }
+}
+
+/**
+ * @param {string | null} code
+ * @param {number | null} status
+ * @param {string} message
+ * @returns {'service'|'rate_limit'|'transport'|'auth'|'timeout'|'aborted'|'tool_error'|'unknown'}
+ */
+function failureCategory(code, status, message) {
+  const label = `${code ?? ''} ${message}`.toUpperCase()
+  if (status === 429 || /RATE.?LIMIT|TOO.?MANY/.test(label)) return 'rate_limit'
+  if (status === 401 || status === 403 || /INVALID.?CREDENTIAL|MISSING.?CREDENTIAL|AUTH|API.?KEY|UNAUTHORIZED|FORBIDDEN/.test(label)) return 'auth'
+  if (status === 408 || status === 504 || /TIMEOUT|TIMED.?OUT|DEADLINE/.test(label)) return 'timeout'
+  if (/ABORT|CANCEL|INTERRUPT/.test(label)) return 'aborted'
+  if (status === 500 || status === 502 || status === 503 || /SERVER|SERVICE|UPSTREAM|BAD.?GATEWAY|OVERLOAD/.test(label)) return 'service'
+  if (/ECONN|ENOTFOUND|EAI_AGAIN|NETWORK|SOCKET|TLS|DNS|FETCH|TRANSPORT|EMPTY.?RESPONSE|STREAM.?CLOSED/.test(label)) return 'transport'
+  if (/TOOL/.test(label)) return 'tool_error'
+  return 'unknown'
+}
+
+/**
+ * @param {string} category
+ * @param {string | null} code
+ * @param {number | null} status
+ * @param {string} message
+ * @returns {string}
+ */
+function failureSummary(category, code, status, message) {
+  const details = []
+  if (code !== null) details.push(code)
+  if (status !== null) details.push(`HTTP ${status}`)
+  const detail = details.length > 0 ? ` (${details.join(', ')})` : ''
+  return `${FAILURE_LABELS[category]}${detail}${message.length > 0 ? `: ${clip(message, 300)}` : ''}`
+}
+
+/**
+ * @param {string} category
+ * @returns {string}
+ */
+function failureHint(category) {
+  switch (category) {
+    case 'auth':
+      return 'Credentials are missing or invalid. Fix them in the dsh web UI, then call dsh_control(action="continue").'
+    case 'aborted':
+      return 'The turn was aborted. Send a new prompt or call dsh_control(action="continue") to resume.'
+    case 'tool_error':
+      return 'A tool call failed. Inspect view="events" for the result, fix the cause, then retry.'
+    case 'unknown':
+      return 'Inspect view="events" for the terminal turn/end reason before deciding whether to continue.'
+    default:
+      return 'This failure is retryable. Call dsh_control(action="continue") to resume the same session.'
+  }
+}
+
+/**
  * @typedef {object} CompactWaitOptions
  * @property {number} [maxChars]
  */
@@ -395,16 +571,7 @@ export function compactWait(value, options = {}) {
   const assistantRecords = chronological
     .map((record) => assistantRecordSummary(record, { maxChars, includeUsage: false }))
     .filter((summary) => summary !== null)
-
-  let latest = null
-  for (let index = assistantRecords.length - 1; index >= 0; index -= 1) {
-    const candidate = assistantRecords[index]
-    if (typeof candidate.text === 'string' && candidate.text.length > 0) {
-      latest = candidate
-      break
-    }
-  }
-  if (latest === null && assistantRecords.length > 0) latest = assistantRecords.at(-1)
+  const reply = selectAssistantReply(chronological, maxChars)
 
   const toolCalls = []
   let omittedToolCalls = 0
@@ -415,7 +582,6 @@ export function compactWait(value, options = {}) {
     }
   }
 
-  const text = truncateText(latest?.text ?? '', maxChars)
   const reason = typeof wait.reason === 'string' ? wait.reason : 'timeout'
   const usage = aggregateUsage(records.map((record) => usageOf(record)))
   const queue = Array.isArray(state.queue) ? state.queue : []
@@ -428,12 +594,14 @@ export function compactWait(value, options = {}) {
     pending_input: Array.isArray(state.pendingInput) ? state.pendingInput : [],
     queue_length: queue.length,
     message_count: records.length,
-    latest_seq: latest?.seq ?? null,
-    latest_text: text.text,
-    text_truncated: text.truncated || latest?.text_truncated === true || output.truncated === true,
+    latest_seq: reply.seq,
+    latest_text: reply.text,
+    latest_reply_kind: reply.kind,
+    text_truncated: reply.truncated || output.truncated === true,
     tool_calls: toolCalls,
     tool_calls_truncated: omittedToolCalls > 0 || assistantRecords.reduce((sum, record) => sum + record.tool_calls.length, 0) > toolCalls.length,
     usage_delta: usage,
+    failure: extractFailure(chronological),
     web_hint: waitHint(reason),
   }
 }

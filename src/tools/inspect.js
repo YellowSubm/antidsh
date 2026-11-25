@@ -12,7 +12,9 @@ import {
   aggregateUsage,
   blocksText,
   clip,
+  extractFailure,
   isAssistantRecord,
+  selectAssistantReply,
   summarizeEvent,
 } from '../format.js'
 import { inspectGit } from '../git.js'
@@ -30,6 +32,16 @@ const VIEWS = ['summary', 'events', 'diff']
 const ALLOWED_KEYS = ['session_id', 'view', 'before_seq', 'through_seq', 'limit', 'path', 'max_chars']
 const DEFAULT_MAX_CHARS = 6000
 const MAX_EVENTS = 50
+const NOISE_TYPES = new Set([
+  'step/start',
+  'step/end',
+  'tool/ptc-dispatch-start',
+  'tool/ptc-dispatch',
+  'job/registered',
+  'job/settled',
+  'llm/retry-started',
+  'agent/inbox/spliced',
+])
 
 /**
  * @param {any} controller
@@ -139,8 +151,9 @@ async function inspectSummary(controller, signal, sessionId, options) {
       const usage = record.event?.data?.usage
       if (isObject(usage)) usages.push(usage)
     }
-    if (isObject(record) && isObject(record.event)) {
-      steps.push(summarizeEvent(record, Math.min(400, options.maxChars)))
+    if (isObject(record) && isObject(record.event) && !NOISE_TYPES.has(record.event.type)) {
+      const step = summarizeEvent(record, Math.min(400, options.maxChars))
+      if (step !== null) steps.push(step)
     }
   }
 
@@ -166,6 +179,8 @@ async function inspectSummary(controller, signal, sessionId, options) {
     })),
     pending_input: isObject(state) && Array.isArray(state.pendingInput) ? state.pendingInput : [],
     recent_steps: recentSteps,
+    latest_reply: selectAssistantReply(records, options.maxChars),
+    failure: extractFailure(records),
     usage,
     events: {
       scanned: records.length,

@@ -6,6 +6,8 @@ import {
   assistantRecordSummary,
   blocksText,
   compactWait,
+  extractFailure,
+  selectAssistantReply,
   summarizeEvent,
   toolCallsOf,
   truncateText,
@@ -164,4 +166,138 @@ test('assistantRecordSummary keeps usage and tool calls in one read', () => {
   assert.equal(summary.text, 'hi')
   assert.equal(summary.tool_calls[0].name, 'read')
   assert.equal(summary.usage.cache_read_tokens, 3)
+})
+
+function attemptRecord(seq, failure) {
+  return {
+    type: 'event',
+    event: {
+      type: 'assistant/attempt',
+      seq,
+      time: 1_700_000_000_000 + seq,
+      data: {
+        turn: 1,
+        step: seq,
+        stream: [{ type: 'chunk', time: 0, chunk: { type: 'finish', reason: { kind: 'error', failure } } }],
+      },
+    },
+  }
+}
+
+function turnEndRecord(seq, reason) {
+  return {
+    type: 'event',
+    event: { type: 'turn/end', seq, time: 1_700_000_000_000 + seq, data: { turn: 1, reason } },
+  }
+}
+
+test('selectAssistantReply prefers a final answer over newer progress text', () => {
+  const toolCall = [{ type: 'tool-call', id: 'c1', name: 'run', arguments: {} }]
+  const reply = selectAssistantReply([
+    assistant(1, 'draft', { content: toolCall }),
+    assistant(2, 'all done'),
+    assistant(3, 'still checking', { content: toolCall }),
+  ], 100)
+  assert.deepEqual(reply, { seq: 2, kind: 'final', text: 'all done', truncated: false })
+})
+
+test('selectAssistantReply falls back to progress and then none', () => {
+  const toolCall = [{ type: 'tool-call', id: 'c1', name: 'run', arguments: {} }]
+  const progress = selectAssistantReply([
+    assistant(1, 'starting', { content: toolCall }),
+    assistant(2, 'more progress', { content: toolCall }),
+  ], 100)
+  assert.equal(progress.kind, 'progress')
+  assert.equal(progress.seq, 2)
+  assert.equal(progress.text, 'more progress')
+
+  assert.deepEqual(selectAssistantReply([assistant(1, '', { content: toolCall })], 100), {
+    seq: null,
+    kind: 'none',
+    text: '',
+    truncated: false,
+  })
+  assert.equal(selectAssistantReply([assistant(1, '  \n\t', { content: toolCall })], 100).kind, 'none')
+})
+
+test('extractFailure classifies retryable service failures and points at continue', () => {
+  const diagnosis = extractFailure([attemptRecord(1, { code: 'SERVER', status: 502, message: 'upstream 502' })])
+  assert.equal(diagnosis.category, 'service')
+  assert.equal(diagnosis.status, 502)
+  assert.equal(diagnosis.code, 'SERVER')
+  assert.equal(diagnosis.retryable, true)
+  assert.match(diagnosis.summary, /502/)
+  assert.match(diagnosis.hint, /dsh_control\(action="continue"\)/)
+})
+
+test('extractFailure classifies rate limits, timeouts, auth, and aborts', () => {
+  const rate = extractFailure([turnEndRecord(2, { kind: 'error', error: { code: 'RATE_LIMIT', status: 429, message: 'slow down' } })])
+  assert.equal(rate.category, 'rate_limit')
+  assert.equal(rate.retryable, true)
+
+  const timeout = extractFailure([attemptRecord(1, { code: 'TIMEOUT', status: 504, message: 'gateway timeout' })])
+  assert.equal(timeout.category, 'timeout')
+  assert.equal(timeout.retryable, true)
+
+  const auth = extractFailure([turnEndRecord(2, { kind: 'error', error: { code: 'INVALID_CREDENTIAL', message: 'bad key' } })])
+  assert.equal(auth.category, 'auth')
+  assert.equal(auth.retryable, false)
+
+  const aborted = extractFailure([turnEndRecord(2, { kind: 'aborted', reason: { kind: 'user' } })])
+  assert.equal(aborted.category, 'aborted')
+  assert.equal(aborted.retryable, false)
+})
+
+test('extractFailure reports an exhausted retry and stays quiet after recovery', () => {
+  const retry = {
+    type: 'event',
+    event: {
+      type: 'llm/retry',
+      seq: 4,
+      time: 1,
+      data: { retry: 2, maxRetries: 2, failure: { code: 'RATE_LIMIT', status: 429, message: 'still limited' } },
+    },
+  }
+  assert.equal(extractFailure([retry]).category, 'rate_limit')
+
+  const recovered = [
+    attemptRecord(1, { code: 'SERVER', status: 502, message: 'blip' }),
+    assistant(2, 'recovered'),
+    turnEndRecord(3, { kind: 'completed' }),
+  ]
+  assert.equal(extractFailure(recovered), null)
+  assert.equal(extractFailure([attemptRecord(1, { code: 'SERVER', status: 502, message: 'blip' }), assistant(2, 'recovered')]), null)
+})
+
+test('extractFailure sees an attempt failure before a reason-less turn/end', () => {
+  const diagnosis = extractFailure([
+    attemptRecord(1, { code: 'SERVER', status: 502, message: 'upstream 502' }),
+    {
+      type: 'event',
+      event: { type: 'step/end', seq: 2, time: 1_700_000_000_002, data: { turn: 1 } },
+    },
+    {
+      type: 'event',
+      event: { type: 'turn/end', seq: 3, time: 1_700_000_000_003, data: { turn: 1 } },
+    },
+  ])
+  assert.equal(diagnosis.category, 'service')
+  assert.equal(diagnosis.status, 502)
+})
+
+test('compactWait reports the reply kind and a structured failure', () => {
+  const compact = compactWait({
+    reason: 'idle',
+    state: { cursor: 9, active: true, running: false, queue: [], pendingInput: [] },
+    output: {
+      truncated: false,
+      records: [
+        turnEndRecord(9, { kind: 'error', error: { code: 'SERVER', status: 502, message: 'upstream' } }),
+        assistant(8, 'still working', { content: [{ type: 'tool-call', id: 'c1', name: 'run', arguments: {} }] }),
+      ],
+    },
+  })
+  assert.equal(compact.latest_reply_kind, 'progress')
+  assert.equal(compact.latest_seq, 8)
+  assert.equal(compact.failure.category, 'service')
 })

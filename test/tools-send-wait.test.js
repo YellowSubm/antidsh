@@ -186,3 +186,40 @@ test('dsh_wait rejects out-of-range timing budgets before calling the controller
     (error) => error.code === -32602 && /at least 100/.test(error.message),
   )
 })
+
+test('dsh_send describes whether the configured default waits', () => {
+  const { controller } = makeSendController()
+
+  const immediate = createSendTool(controller, {})
+  assert.match(immediate.description, /immediate accepted response/)
+  assert.match(immediate.inputSchema.properties.wait_ms.description, /0 returns immediately \(default\)/)
+
+  const waiting = createSendTool(controller, { defaultWaitMs: 2000 })
+  assert.match(waiting.description, /default 2000ms/)
+  assert.match(waiting.inputSchema.properties.wait_ms.description, /waits 2000ms/)
+})
+
+test('dsh_wait attaches a failure diagnosis from the just-ended turn', async () => {
+  const controller = {
+    async wait() {
+      return waitValue([])
+    },
+    async events() {
+      return {
+        records: [{
+          type: 'event',
+          event: {
+            type: 'turn/end',
+            seq: 12,
+            time: 1,
+            data: { turn: 1, reason: { kind: 'error', error: { code: 'SERVER', status: 502, message: 'upstream 502' } } },
+          },
+        }],
+      }
+    },
+  }
+  const result = await createWaitTool(controller).handler({ session_id: 's1' })
+  assert.equal(result.failure.category, 'service')
+  assert.equal(result.failure.status, 502)
+  assert.match(result.failure.hint, /continue/)
+})

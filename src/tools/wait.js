@@ -7,6 +7,7 @@
  * Antigravity-side cancellation stops the wait instead of leaking it.
  */
 
+import { isObject } from '../protocol.js'
 import {
   assertAllowedKeys,
   argumentsOf,
@@ -14,7 +15,7 @@ import {
   readString,
   signalOf,
 } from './args.js'
-import { compactWait } from '../format.js'
+import { compactWait, extractFailure } from '../format.js'
 
 const ALLOWED_KEYS = ['session_id', 'after_seq', 'timeout_ms', 'max_chars']
 const DEFAULT_TIMEOUT_MS = 45_000
@@ -29,7 +30,7 @@ export function createWaitTool(controller) {
     name: 'dsh_wait',
     description: [
       'Wait for a dsh session to become idle, need human input, or reach a timeout.',
-      'Returns the newest assistant text (truncated), tool calls, token usage delta, and the cursor to pass to the next wait.',
+      'Returns the newest assistant text (truncated), tool calls, token usage delta, a structured failure diagnosis, and the cursor to pass to the next wait.',
       'reason="idle" means the turn finished; "input-required" means a human must answer in the dsh web UI; "timeout" means work is still in progress.',
     ].join(' '),
     inputSchema: {
@@ -79,14 +80,42 @@ export function createWaitTool(controller) {
       const request = { sessionId, timeoutMs, maxMessages: 10 }
       if (afterSeq !== undefined) request.afterSeq = afterSeq
 
-      const waited = await controller.wait(request, signalOf(context))
+      const signal = signalOf(context)
+      const waited = await controller.wait(request, signal)
       const compact = compactWait(waited, { maxChars })
-
-      return {
+      const result = {
         session_id: sessionId,
         timeout_ms: timeoutMs,
         ...compact,
       }
+      if (result.failure === null && compact.reason === 'idle') {
+        result.failure = await readFailure(controller, signal, sessionId, compact.cursor)
+      }
+      return result
     },
+  }
+}
+
+/**
+ * Wait output only carries assistant messages, so an idle turn needs one
+ * events read to expose the terminal failure that produced no reply.
+ *
+ * @param {any} controller
+ * @param {AbortSignal} signal
+ * @param {string} sessionId
+ * @param {number | null} cursor
+ * @returns {Promise<ReturnType<typeof extractFailure>>}
+ */
+async function readFailure(controller, signal, sessionId, cursor) {
+  if (typeof controller.events !== 'function') return null
+  /** @type {Record<string, unknown>} */
+  const request = { address: { kind: 'session', sessionId }, maxMessages: 20 }
+  if (typeof cursor === 'number') request.beforeSeq = cursor + 1
+  try {
+    const page = await controller.events(request, signal)
+    const records = isObject(page) && Array.isArray(page.records) ? page.records : []
+    return extractFailure(records)
+  } catch {
+    return null
   }
 }

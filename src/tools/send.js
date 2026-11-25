@@ -33,13 +33,17 @@ const WEB_HINT = 'Open the dsh web UI to watch or intervene; approvals and quest
  */
 export function createSendTool(controller, config = {}) {
   const configuredDefault = normalizeDefaultWait(config.defaultWaitMs)
+  const defaultWait = configuredDefault === 0 ? null : configuredDefault
+  const waitHint = defaultWait === null
+    ? 'Set wait_ms to 1000..25000 to return a short progress snapshot; omit it for an immediate accepted response.'
+    : `Set wait_ms to 0 for an immediate accepted response, or 1000..25000 to override the default ${defaultWait}ms progress wait.`
 
   return {
     name: 'dsh_send',
     description: [
       'Send a prompt to an existing dsh session.',
       'mode="queue" adds it to the input queue; mode="steer" redirects the running turn.',
-      'Set wait_ms to 1000..25000 to return a short progress snapshot; omit it for an immediate accepted response.',
+      waitHint,
     ].join(' '),
     inputSchema: {
       type: 'object',
@@ -55,7 +59,9 @@ export function createSendTool(controller, config = {}) {
           type: 'integer',
           minimum: 0,
           maximum: 25000,
-          description: '0 (default) returns immediately; otherwise 1000..25000 waits briefly for a snapshot.',
+          description: defaultWait === null
+            ? '0 returns immediately (default); 1000..25000 waits briefly for a snapshot.'
+            : `0 returns immediately; when omitted, waits ${defaultWait}ms; 1000..25000 overrides.`,
         },
       },
       required: ['session_id', 'prompt'],

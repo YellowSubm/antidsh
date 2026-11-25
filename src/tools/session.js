@@ -43,12 +43,9 @@ const ALLOWED_KEYS = [
 export function createSessionTool(controller, services = {}) {
   return {
     name: 'dsh_session',
-    description: [
-      'List, search, create, rename, or fork dsh sessions, and list registered Workspaces.',
-      'Call action="list" first and reuse a running or recent session instead of creating a duplicate.',
-      'action="create" with cwd binds the session to the Workspace for that directory when the host provides Workspace services.',
-      'Every listed session_id can be used with dsh_send, dsh_wait, dsh_inspect, and dsh_control.',
-    ].join(' '),
+    get description() {
+      return sessionDescription(services)
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -117,6 +114,33 @@ export function createSessionTool(controller, services = {}) {
       }
     },
   }
+}
+
+/**
+ * Optional Workspace services can arrive after this plugin starts; read them
+ * on every tools/list instead of freezing the description at construction.
+ *
+ * @param {{ workspaceController?: () => any, workspaceRegistry?: () => any }} services
+ * @returns {string}
+ */
+function sessionDescription(services) {
+  const workspaceController = serviceOf(services.workspaceController)
+  const workspaceRegistry = serviceOf(services.workspaceRegistry)
+  const canBind = isObject(workspaceController) && typeof workspaceController.create === 'function'
+  const canList = isObject(workspaceRegistry) && typeof workspaceRegistry.list === 'function'
+  return [
+    canList
+      ? 'List, search, create, rename, or fork dsh sessions, and list registered Workspaces.'
+      : 'List, search, create, rename, or fork dsh sessions.',
+    'Call action="list" first and reuse a running or recent session instead of creating a duplicate.',
+    canBind
+      ? 'action="create" with cwd binds the session to the Workspace for that directory.'
+      : 'action="create" with cwd creates the session directly in that directory.',
+    canList
+      ? 'action="workspaces" lists Workspace id, title, path, and session count.'
+      : 'Workspace listing is unavailable on this host.',
+    'Every listed session_id can be used with dsh_send, dsh_wait, dsh_inspect, and dsh_control.',
+  ].join(' ')
 }
 
 /**

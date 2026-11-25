@@ -262,3 +262,39 @@ test('dsh_session workspaces degrades to an empty list without a registry', asyn
   assert.deepEqual(result, { workspaces: [], count: 0 })
 })
 
+test('dsh_session descriptions track the available Workspace capabilities', () => {
+  const { controller } = makeController()
+  const plain = createSessionTool(controller)
+  assert.match(plain.description, /creates the session directly in that directory/)
+  assert.match(plain.description, /Workspace listing is unavailable/)
+  assert.doesNotMatch(plain.description, /binds the session to the Workspace/)
+
+  const bound = createSessionTool(controller, { workspaceController: () => ({ async create() {} }) })
+  assert.match(bound.description, /binds the session to the Workspace/)
+  assert.match(bound.description, /Workspace listing is unavailable/)
+
+  const full = createSessionTool(controller, {
+    workspaceController: () => ({ async create() {} }),
+    workspaceRegistry: () => ({ list: () => [] }),
+  })
+  assert.match(full.description, /action="workspaces" lists/)
+})
+
+test('dsh_session description reflects Workspace services that start later', () => {
+  const { controller } = makeController()
+  let workspaceController
+  let workspaceRegistry
+  const tool = createSessionTool(controller, {
+    workspaceController: () => workspaceController,
+    workspaceRegistry: () => workspaceRegistry,
+  })
+  assert.match(tool.description, /creates the session directly in that directory/)
+  assert.match(tool.description, /Workspace listing is unavailable/)
+
+  workspaceController = { async create() {} }
+  workspaceRegistry = { list: () => [] }
+
+  assert.match(tool.description, /binds the session to the Workspace/)
+  assert.match(tool.description, /action="workspaces" lists/)
+  assert.doesNotMatch(tool.description, /Workspace listing is unavailable/)
+})
