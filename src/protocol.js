@@ -32,7 +32,7 @@ export function isCompatibleProtocolVersion(value) {
 
 export const SERVER_INFO = Object.freeze({
   name: 'dsh-antidsh-mcp',
-  version: '0.1.0',
+  version: '0.2.0',
 })
 
 /**

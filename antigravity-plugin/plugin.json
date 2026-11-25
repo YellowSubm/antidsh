@@ -1,0 +1,12 @@
+{
+  "name": "antidsh",
+  "displayName": "AntiDSH",
+  "description": "Zero-config bridge connecting Antigravity (Neon) to your live DeepSeek Harness (dsh Desktop / dsh web) session control plane with human-in-the-loop control and cache-friendly long sessions.",
+  "version": "0.2.0",
+  "repository": "https://github.com/YellowSubm/antidsh",
+  "suggestedPrompts": [
+    "List my active dsh sessions and reuse the matching one for this repo",
+    "Plan this feature first, then delegate implementation to DeepSeek in dsh",
+    "Check the latest dsh session summary and git diff before reviewing"
+  ]
+}

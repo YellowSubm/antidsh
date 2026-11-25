@@ -1,6 +1,6 @@
 {
   "name": "dsh-antidsh-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server exposing the live DeepSeek Harness session control plane over Streamable HTTP.",
   "type": "module",
   "main": "./src/index.js",
