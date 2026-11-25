@@ -87,7 +87,11 @@ export function apply(ctx, config) {
   const token = resolvedAuth.token
 
   const handler = createMcpHandler({
-    tools: createTools(ctx.sessionController, { defaultWaitMs: config.defaultWaitMs }),
+    tools: createTools(ctx.sessionController, {
+      defaultWaitMs: config.defaultWaitMs,
+      workspaceController: () => ctx.get('workspaceController'),
+      workspaceRegistry: () => ctx.get('workspaceRegistry'),
+    }),
     serverInfo: SERVER_INFO,
     instructions: INSTRUCTIONS,
     security: { token, allowUnauthenticatedLoopback, allowedHostnames },

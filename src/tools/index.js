@@ -11,12 +11,15 @@ import { createWaitTool } from './wait.js'
 
 /**
  * @param {any} controller
- * @param {{ defaultWaitMs?: number }} [config]
+ * @param {{ defaultWaitMs?: number, workspaceController?: () => any, workspaceRegistry?: () => any }} [config]
  * @returns {import('../protocol.js').ToolDefinition[]}
  */
 export function createTools(controller, config = {}) {
   return [
-    createSessionTool(controller),
+    createSessionTool(controller, {
+      workspaceController: config.workspaceController,
+      workspaceRegistry: config.workspaceRegistry,
+    }),
     createSendTool(controller, { defaultWaitMs: config.defaultWaitMs }),
     createWaitTool(controller),
     createInspectTool(controller),

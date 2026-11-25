@@ -5,10 +5,22 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { Config, apply, inject, name } from '../src/index.js'
+import { createTools } from '../src/tools/index.js'
 
 test('the plugin declares the expected identity and injection', () => {
   assert.equal(name, 'dsh-antidsh-mcp')
   assert.deepEqual(inject, ['webServer', 'sessionController'])
+})
+
+test('createTools keeps the five advertised tools', () => {
+  const tools = createTools({})
+  assert.deepEqual(tools.map((tool) => tool.name), [
+    'dsh_session',
+    'dsh_send',
+    'dsh_wait',
+    'dsh_inspect',
+    'dsh_control',
+  ])
 })
 
 test('Config applies defaults for an empty config object', () => {
@@ -41,6 +53,9 @@ test('apply registers one anonymous exact route and logs readiness', () => {
     effect(callback, label) {
       this.label = label
       return callback()
+    },
+    get() {
+      return undefined
     },
   }
 
@@ -80,6 +95,9 @@ test('apply auto-generates token and publishes runtime discovery file into DSH_H
       effect(callback) {
         disposer = callback()
         return disposer
+      },
+      get() {
+        return undefined
       },
     }
 

@@ -146,3 +146,119 @@ test('dsh_session rejects unknown keys instead of ignoring them', async () => {
     (error) => error.code === -32602 && /unknown argument/.test(error.message),
   )
 })
+
+test('dsh_session list resolves workspace membership through the registry', async () => {
+  const { controller } = makeController({ list: { items: summaries } })
+  const registry = {
+    list: () => [{ id: 'ws1', title: 'Alpha', path: 'F:/work', sessionIds: ['s-new'] }],
+  }
+  const tool = createSessionTool(controller, { workspaceRegistry: () => registry })
+  const result = await tool.handler({ action: 'list' })
+
+  assert.equal(result[0].workspace_id, 'ws1')
+  assert.equal(result[0].workspace_title, 'Alpha')
+  assert.equal(result[1].workspace_id, null)
+  assert.equal(result[1].workspace_title, null)
+})
+
+test('dsh_session list degrades to null workspace fields without a registry', async () => {
+  const { controller } = makeController({ list: { items: summaries } })
+  const tool = createSessionTool(controller)
+  const result = await tool.handler({ action: 'list' })
+
+  assert.equal(result[0].workspace_id, null)
+  assert.equal(result[0].workspace_title, null)
+})
+
+test('dsh_session create reuses an existing workspace for cwd', async () => {
+  const { controller, calls } = makeController()
+  const workspaceCalls = []
+  const tool = createSessionTool(controller, {
+    workspaceController: () => ({
+      async create(request) {
+        workspaceCalls.push(request)
+        return {
+          workspace: { workspaceId: 'ws1', title: 'Alpha', path: 'F:/work', sessionIds: ['s-old'] },
+          created: false,
+        }
+      },
+    }),
+  })
+
+  const result = await tool.handler({ action: 'create', cwd: 'F:/work' })
+  assert.deepEqual(workspaceCalls, [{ path: 'F:/work' }])
+  assert.deepEqual(calls[0][1], { workspaceId: 'ws1' })
+  assert.equal(result.workspace_id, 'ws1')
+  assert.equal(result.workspace_title, 'Alpha')
+  assert.equal(result.workspace_created, false)
+})
+
+test('dsh_session create reports a newly created workspace', async () => {
+  const { controller, calls } = makeController()
+  const tool = createSessionTool(controller, {
+    workspaceController: () => ({
+      async create() {
+        return {
+          workspace: { workspaceId: 'ws-new', title: 'New', path: 'F:/work/fresh', sessionIds: [] },
+          created: true,
+        }
+      },
+    }),
+  })
+
+  const result = await tool.handler({ action: 'create', cwd: 'F:/work/fresh' })
+  assert.deepEqual(calls[0][1], { workspaceId: 'ws-new' })
+  assert.equal(result.workspace_id, 'ws-new')
+  assert.equal(result.workspace_created, true)
+})
+
+test('dsh_session create falls back to cwd without workspace services', async () => {
+  const { controller, calls } = makeController()
+  const tool = createSessionTool(controller)
+  const result = await tool.handler({ action: 'create', cwd: 'F:/work' })
+
+  assert.deepEqual(calls[0][1], { cwd: 'F:/work' })
+  assert.equal(result.workspace_id, null)
+  assert.equal(result.workspace_title, null)
+  assert.equal(result.workspace_created, false)
+})
+
+test('dsh_session create with an explicit workspace_id skips workspace resolution', async () => {
+  const { controller, calls } = makeController()
+  const workspaceCalls = []
+  const tool = createSessionTool(controller, {
+    workspaceController: () => ({
+      async create(request) {
+        workspaceCalls.push(request)
+      },
+    }),
+  })
+
+  const result = await tool.handler({ action: 'create', workspace_id: 'ws-explicit' })
+  assert.equal(workspaceCalls.length, 0)
+  assert.deepEqual(calls[0][1], { workspaceId: 'ws-explicit' })
+  assert.equal(result.workspace_id, 'ws-explicit')
+})
+
+test('dsh_session workspaces lists registry entries read-only', async () => {
+  const { controller } = makeController()
+  const registry = {
+    list: () => [{ id: 'ws1', title: 'Alpha', path: 'F:/work', sessionIds: ['a', 'b'] }],
+  }
+  const tool = createSessionTool(controller, { workspaceRegistry: () => registry })
+  const result = await tool.handler({ action: 'workspaces' })
+
+  assert.deepEqual(result.workspaces, [
+    { workspace_id: 'ws1', title: 'Alpha', path: 'F:/work', session_count: 2 },
+  ])
+  assert.equal(result.count, 1)
+})
+
+test('dsh_session workspaces degrades to an empty list without a registry', async () => {
+  const { controller } = makeController()
+  const tool = createSessionTool(controller)
+  const result = await tool.handler({ action: 'workspaces' })
+
+  assert.deepEqual(result, { workspaces: [], count: 0 })
+})
+

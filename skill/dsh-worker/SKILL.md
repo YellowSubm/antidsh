@@ -34,8 +34,8 @@ Use this playbook whenever Antigravity (Neon) acts as **Architect / Reviewer** a
 ## 2. Standard Execution Loop
 
 1. **Locate or Prepare Session**
-   - Call `dsh_session(action="list")`.
-   - Pick the matching warm session for the target `cwd`; if none exists, call `dsh_session(action="create", cwd="...", title="...")`.
+   - Call `dsh_session(action="list")`. Each row carries `workspace_id` and `workspace_title` when the host exposes Workspaces.
+   - Pick the matching warm session for the target `cwd`; if none exists, call `dsh_session(action="create", cwd="...", title="...")`. The host binds `cwd` to its Workspace automatically; the reply's `workspace_id`, `workspace_title`, and `workspace_created` show the result, and `dsh_session(action="workspaces")` lists registered Workspaces with their `session_count`.
 2. **Dispatch Bounded Task**
    - Call `dsh_send(session_id, prompt, mode="queue", wait_ms=15000)`.
    - Save `cursor_before` so subsequent waits only summarize new output.

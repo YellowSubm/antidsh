@@ -22,7 +22,7 @@ import {
 } from './args.js'
 import { toIso } from '../format.js'
 
-const ACTIONS = ['list', 'search', 'create', 'rename', 'fork']
+const ACTIONS = ['list', 'search', 'create', 'workspaces', 'rename', 'fork']
 
 const ALLOWED_KEYS = [
   'action',
@@ -37,14 +37,16 @@ const ALLOWED_KEYS = [
 
 /**
  * @param {{ list: Function, search: Function, create: Function, rename: Function, fork: Function }} controller
+ * @param {{ workspaceController?: () => any, workspaceRegistry?: () => any }} [services]
  * @returns {import('../protocol.js').ToolDefinition}
  */
-export function createSessionTool(controller) {
+export function createSessionTool(controller, services = {}) {
   return {
     name: 'dsh_session',
     description: [
-      'List, search, create, rename, or fork dsh sessions.',
+      'List, search, create, rename, or fork dsh sessions, and list registered Workspaces.',
       'Call action="list" first and reuse a running or recent session instead of creating a duplicate.',
+      'action="create" with cwd binds the session to the Workspace for that directory when the host provides Workspace services.',
       'Every listed session_id can be used with dsh_send, dsh_wait, dsh_inspect, and dsh_control.',
     ].join(' '),
     inputSchema: {
@@ -53,7 +55,7 @@ export function createSessionTool(controller) {
         action: {
           type: 'string',
           enum: ACTIONS,
-          description: 'list (default) | search | create | rename | fork',
+          description: 'list (default) | search | create | workspaces | rename | fork',
         },
         query: {
           type: 'string',
@@ -99,11 +101,13 @@ export function createSessionTool(controller) {
 
       switch (action) {
         case 'list':
-          return listSessions(controller, signal, limit)
+          return listSessions(controller, signal, limit, services)
         case 'search':
           return searchSessions(controller, args, signal, limit)
         case 'create':
-          return createSession(controller, args)
+          return createSession(controller, args, services)
+        case 'workspaces':
+          return listWorkspaces(services)
         case 'rename':
           return renameSession(controller, args)
         case 'fork':
@@ -119,18 +123,24 @@ export function createSessionTool(controller) {
  * @param {any} controller
  * @param {AbortSignal} signal
  * @param {number} limit
+ * @param {{ workspaceController?: () => any, workspaceRegistry?: () => any }} services
  * @returns {Promise<Record<string, unknown>>}
  */
-async function listSessions(controller, signal, limit) {
+async function listSessions(controller, signal, limit, services) {
   const value = await controller.list({}, signal)
   const items = isObject(value) && Array.isArray(value.items) ? value.items : []
+  const index = workspaceIndex(serviceOf(services.workspaceRegistry))
   const rows = items
     .map((item) => {
       const summary = isObject(item) ? item : {}
+      const sessionId = typeof summary.sessionId === 'string' ? summary.sessionId : null
+      const workspace = sessionId === null ? undefined : index.get(sessionId)
       return {
-        session_id: typeof summary.sessionId === 'string' ? summary.sessionId : null,
+        session_id: sessionId,
         title: titleOf(summary) ?? null,
         cwd: typeof summary.cwd === 'string' ? summary.cwd : null,
+        workspace_id: workspace?.workspaceId ?? null,
+        workspace_title: workspace?.title ?? null,
         running: summary.running === true,
         agent_available: summary.agentAvailable === true,
         updated_at: toIso(summary.updatedAt),
@@ -177,24 +187,42 @@ async function searchSessions(controller, args, signal, limit) {
 /**
  * @param {any} controller
  * @param {Record<string, unknown>} args
+ * @param {{ workspaceController?: () => any, workspaceRegistry?: () => any }} services
  * @returns {Promise<Record<string, unknown>>}
  */
-async function createSession(controller, args) {
+async function createSession(controller, args, services) {
   const cwd = readOptionalString(args, 'cwd', { maxLength: 4096 })
-  const workspaceId = readOptionalString(args, 'workspace_id', { maxLength: 512 })
+  const requestedWorkspaceId = readOptionalString(args, 'workspace_id', { maxLength: 512 })
   const title = readText(args, 'title', { maxLength: 500 })
 
-  if (cwd !== undefined && workspaceId !== undefined) {
+  if (cwd !== undefined && requestedWorkspaceId !== undefined) {
     throw invalidArgument('"cwd" and "workspace_id" are mutually exclusive')
   }
   if (cwd !== undefined && !isAbsolute(cwd) && !win32.isAbsolute(cwd)) {
     throw invalidArgument('"cwd" must be an absolute path')
   }
 
+  let workspaceId = requestedWorkspaceId
+  let workspaceTitle = null
+  let workspaceCreated = false
+
+  if (cwd !== undefined) {
+    const workspaceController = serviceOf(services.workspaceController)
+    if (isObject(workspaceController) && typeof workspaceController.create === 'function') {
+      const value = await workspaceController.create({ path: cwd })
+      const workspace = isObject(value) && isObject(value.workspace) ? value.workspace : null
+      if (workspace !== null && typeof workspace.workspaceId === 'string') {
+        workspaceId = workspace.workspaceId
+        workspaceTitle = typeof workspace.title === 'string' ? workspace.title : null
+        workspaceCreated = value.created === true
+      }
+    }
+  }
+
   /** @type {{ cwd?: string, workspaceId?: string }} */
   const request = {}
-  if (cwd !== undefined) request.cwd = cwd
   if (workspaceId !== undefined) request.workspaceId = workspaceId
+  else if (cwd !== undefined) request.cwd = cwd
 
   const created = await controller.create(request)
   const createdId = isObject(created) && typeof created.sessionId === 'string' ? created.sessionId : null
@@ -211,8 +239,64 @@ async function createSession(controller, args) {
     title: renamed,
     cwd: cwd ?? null,
     workspace_id: workspaceId ?? null,
+    workspace_title: workspaceTitle,
+    workspace_created: workspaceCreated,
     next: 'Send the first prompt with dsh_send(mode="queue"), then wait with dsh_wait.',
   }
+}
+
+/**
+ * @param {{ workspaceRegistry?: () => any }} services
+ * @returns {{ workspaces: Array<Record<string, unknown>>, count: number }}
+ */
+function listWorkspaces(services) {
+  const registry = serviceOf(services.workspaceRegistry)
+  const rows = []
+  if (isObject(registry) && typeof registry.list === 'function') {
+    const workspaces = registry.list()
+    if (Array.isArray(workspaces)) {
+      for (const workspace of workspaces) {
+        if (!isObject(workspace)) continue
+        rows.push({
+          workspace_id: typeof workspace.id === 'string' ? workspace.id : null,
+          title: typeof workspace.title === 'string' ? workspace.title : null,
+          path: typeof workspace.path === 'string' ? workspace.path : null,
+          session_count: Array.isArray(workspace.sessionIds) ? workspace.sessionIds.length : 0,
+        })
+      }
+    }
+  }
+  return { workspaces: rows, count: rows.length }
+}
+
+/**
+ * @param {any} registry
+ * @returns {Map<string, { workspaceId: string | null, title: string | null }>}
+ */
+function workspaceIndex(registry) {
+  const index = new Map()
+  if (!isObject(registry) || typeof registry.list !== 'function') return index
+  const workspaces = registry.list()
+  if (!Array.isArray(workspaces)) return index
+  for (const workspace of workspaces) {
+    if (!isObject(workspace) || !Array.isArray(workspace.sessionIds)) continue
+    const entry = {
+      workspaceId: typeof workspace.id === 'string' ? workspace.id : null,
+      title: typeof workspace.title === 'string' ? workspace.title : null,
+    }
+    for (const sessionId of workspace.sessionIds) {
+      if (typeof sessionId === 'string') index.set(sessionId, entry)
+    }
+  }
+  return index
+}
+
+/**
+ * @param {(() => any) | undefined} read
+ * @returns {any}
+ */
+function serviceOf(read) {
+  return typeof read === 'function' ? read() : undefined
 }
 
 /**
